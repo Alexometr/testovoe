@@ -4,59 +4,175 @@
 #include <arpa/inet.h>
 #include <string>
 #include <fstream>
+#include <cstring>
 
-int main ()
+int main (int argc, char* argv[])
 {
+	const int DEFAULT_CHUNK = 1024;
+	const int DEFAULT_PORT = 8080;
+	int chunk = DEFAULT_CHUNK;
+	int port = DEFAULT_PORT;
+	if(argc < 5 || argc > 9)
+	{
+		std::cout << "Ошибка, неверный формат команды.\n";
+		std::cout << "Пример: client_app -src 127.0.0.1:/tmp/file_src -dst /tmp/file_dst [-chunk 2048]\n";
+		return 1;
+	}
+	
+	std::string source_param = "";
+	std::string destination_path = "";
+	for (int i = 1; i < argc; i++) //защита от перестановок аргументов местами
+	{
+		std::string arg = argv[i];
+		if(arg == "-src" && i+1 < argc){source_param = argv[i+1]; i++;}
+		else if(arg == "-dst" && i+1 < argc){destination_path = argv[i+1]; i++;}
+		else if(arg == "-chunk" && i+1 < argc)
+		{
+			try
+			{
+				chunk = std::stoi(argv[i+1]);
+				if(chunk <= 0)
+				{
+					std::cout << "Ошибка. Размер чанка должен натуральным числом\n";
+					return 1;
+				}
+				if(chunk > 1024*1024)
+				{
+					std::cout << "Размер чанка слишком большой. Установлен размер 1 Мб\n";
+					chunk = 1024*1024;
+				}
+				i++;
+			}
+			catch (const std::exception& e)
+       			{
+            			std::cout << "Ошибка: неверный формат размера чанка\n";
+            			return 1;
+        		}
+		}
+		else if(arg == "-p" && i+1 < argc)
+		{
+			try
+			{
+				port = std::stoi(argv[i+1]);
+				if(port < 0 || port > 65535)
+				{
+					std::cout << "Ошибка. Порт должен быть в диапазоне 1 - 65535\n";
+					return 1;
+				}
+				i++;
+			}
+			catch (const std::exception& e)
+			{
+				std::cout << "Ошибка. Неверный формат порта\n";
+				return 1;
+			}
+		}
+	}
+	if(source_param.empty() || destination_path.empty())
+	{
+		std::cout << "Ошибка пропущены параметры -src или -dst\n";
+		return 1;
+	}
+	size_t position = source_param.find(":");
+	if (position == std::string::npos)
+	{
+		std::cout << "Ошибка. Пропущено двоеточие между IP и путем\n";
+		return 1;
+	}
+
+	std::string ip_addr = source_param.substr(0, position); //IP адрес сервера
+	std::string server_file_path = source_param.substr(position + 1); //путь к файлу на сервере
+
 	int sock_descr = socket(AF_INET, SOCK_STREAM, 0);
 	sockaddr_in serv_addr{};
 	serv_addr.sin_family = AF_INET;
-	serv_addr.sin_port = htons(8080);
-	inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
-	connect(sock_descr, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
-	std::cout << "Подключено к серверу\n";
-	char buffer[1024] = {0};	
-	while (true)
+	serv_addr.sin_port = htons(port);
+	inet_pton(AF_INET, ip_addr.c_str(), &serv_addr.sin_addr);
+	std::cout << "Подключение к серверу " << ip_addr << "...\n";
+	std::cout << "Порт:" << port << "\n";
+	if(connect(sock_descr, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
 	{
-		std::string input;
-		std::cout << ">"; //символ приглашения написать строку
-		std::getline (std::cin, input); //записываем строку на экране в инпут
+		std::cout << "Ошибка подключения к серверу.\n";
+		close(sock_descr);
+		return 1;
+	}
+	else
+	{
+		std::cout << "Подключено к серверу\n";
+	}
+	std::string command = "download " + server_file_path + " " + std::to_string(chunk);
+	char* buffer = new char[chunk];
+	memset(buffer, 0, chunk);
+	send(sock_descr, command.c_str(), command.length(), 0);
 
-		if(input == "exit"){break;}
-	        send(sock_descr, input.c_str(), input.length(), 0); //предварительно превратили инпут в указатель
-								    //на массив байт (нужно для ф-ции send)	
-		for (int i = 0; i < 1024; i++){buffer[i] = 0;}
-		int valread = read(sock_descr, buffer, 1024);
-		if (valread <= 0)
+	int valread = read(sock_descr, buffer, 1024);
+	if (valread <= 0)
+	{
+		std::cout << "Сервер разорвал соединение...\n";
+		close(sock_descr);
+		return 1;
+	}
+	std::string response(buffer);
+	if (response.rfind ("INFO: START TRANSFER", 0) == 0)
+	{
+		long file_size = 0;
+		std::string rest = response.substr(20);
+		if(!rest.empty())
 		{
-			std::cout << "Сервер разорвал соединение...\n";
-			break;
-		}
-		std::string response(buffer);
-		if (response == "INFO: START TRANSFER")
-		{
-			std::string filename = input.substr(9);
-			std::cout << "Файл найден. Скачивание...\n";
-			std::ofstream file("downloaded_" + filename, std::ios::binary);
-			while(true)
+			try
 			{
-				for(int i = 0; i < 1024; i++) {buffer[i] = 0;}
-				int bytes_receive = read(sock_descr, buffer,1024);
-				if (bytes_receive <=0){break;}
-				file.write(buffer, bytes_receive);
+				file_size = std::stoi(rest);
 			}
-			file.close();
-			std::cout << "Файл сохранен как: downloaded_" << filename << "\n";
-			break;
+			catch(...)
+			{
+				file_size = 0;
+			}
 		}
-		else if (response == "ERROR: file not found")
+		std::cout << "Файл найден. Размер: "<< file_size << " байт\n";
+		std::cout << "Скачивание...\n";
+		char* file_buffer = new char[chunk];
+		std::ofstream file(destination_path, std::ios::binary);
+		long total_bytes = 0;
+		while(true)
 		{
-			std::cout << "Файл не найден на сервере\n";
-		}
-		else
-		{
-			std::cout << "Ответ от сервера" << buffer << "\n";
-		}
+			for(int i = 0; i < chunk; i++) {buffer[i] = 0;}
+			int bytes_receive = read(sock_descr, buffer, chunk);
+			if (bytes_receive <=0){break;}
+			std::string data(buffer, bytes_receive);
+			if (bytes_receive >= 7 && data.substr(bytes_receive - 7) == "__EOF__")
+    			{
+				int write_bytes = bytes_receive - 7;
+        			if (write_bytes > 0)
+        			{
+            				file.write(buffer, write_bytes);
+            				total_bytes += write_bytes;
+        			}
+        			break;
+    			}
+			file.write(buffer, bytes_receive);
+			total_bytes += bytes_receive;
+			if (file_size > 0)
+			{
+				int percent = (int)((total_bytes * 100) / file_size);
+                		std::cout << "\rПередано " << total_bytes << " байт/" << file_size << " байт (" << percent << "%)" <<std::flush;
+			}
+			else 
+			{
+                		std::cout << "\rПередано " << total_bytes << " байт" <<std::flush;
+			}
 
+		}
+		std::cout << std::endl;
+		file.close();
+		std::cout << "Скачивание успешно завершено\n";
+	}
+	else if (response == "ERROR: file not found")
+	{
+		std::cout << "Файл не найден на сервере\n";
+	}
+	else
+	{
+		std::cout << "Ответ от сервера" << buffer << "\n";
 	}
 	close (sock_descr);
 	return 0;
