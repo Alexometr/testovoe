@@ -5,7 +5,7 @@
 #include <thread> //для потоков
 #include <string>
 #include <fstream> //для работы с файлами
-#include <sstream>
+#include <sstream> //вспомогательный инструмент для строк
 
 const int DEFAULT_PORT = 8080;
 
@@ -20,80 +20,77 @@ void client_func (int client_socket) //сокет обрабатывающий �
 		{buffer[i] = 0;} //чистим буфер от возможного мусора
 
 		int valread = read(client_socket, buffer, 1024);
-		if (valread <=0) //0 - клиент закрыл сокет, -1 - ошибка сети
+		if (valread <= 0) //0 - клиент закрыл сокет, -1 - ошибка сети
 		{
 	
 			std::cout << "[Поток" << std::this_thread::get_id() << "] Клиент отключился\n";
 			break;
 		}
-		std::string text(buffer);
-		if(text.rfind("download ",0) == 0)//юзаем rfind, чтобы не проходится по строке, а начать с самого
-						  //левого символа и если ненаход идти левее
-		{
-			std::string name;
-			std::string filename = text.substr(9); //убираем слово download
-			std::istringstream iss(filename);
-			int chunk_test;
-			iss >> name;
-			if(iss >> chunk_test)
-			{
-				if(chunk_test > 0)
-				{
-					chunk = chunk_test;
-				}
-			}
-			std::cout << "[Поток" << std::this_thread::get_id() << "] Запрос на скачивание файла" << name << "\n";
-			std::cout << "Размер чанка: " << chunk << " байт\n";
-			std::ifstream file(name, std::ios::binary);
-			if(!file.is_open())
-			{
-				std::string error = "ERROR: file not found";
-				std::cout << error;
-				send(client_socket, error.c_str(), error.length(), 0);
-				continue;
-			}
-			file.seekg(0, std::ios::end);
-			long file_size = file.tellg();
-			file.seekg(0, std::ios::beg);
+		std::string text(buffer); //тут приходит строка пути файла + размер чанка /home/alex/... (пробел) 1024
+		std::string filename;		
+		std::istringstream iss(text);
+		iss >> filename; //тут будет считывание только до первого пробела, все что после пробела считано не будет
+		iss >> chunk; //в чанк теперь запишется число чанка без пробела
+		std::cout << "[Поток" << std::this_thread::get_id() << "] Запрос на скачивание файла" << filename << "\n";
+		std::cout << "Размер чанка: " << chunk << " байт\n";
+		std::ifstream file(filename, std::ios::binary); //читаем файл, второй аргумент открывает файл в бинарном режиме
+							    //не заменяя никакие символы (важно для не текстовых файлов)
 
-			std::string info = "INFO: START TRANSFER" + std::to_string(file_size);
-			send(client_socket, info.c_str(), info.length(),0);
-			usleep(10000); //небольшой сон, чтобы сообщение и тело файла не пришли в одном сетевом пакете
-				       //и тело файла не улетело в мусор
-			char* file_buffer = new char [chunk];
-			while(!file.eof()) //пока не дошли до конца файла
-			{
-				file.read(file_buffer, chunk); //записываем в буффер 1024 байта данных
-				int bytes_read = file.gcount(); //сколько реально записали
-				if (bytes_read > 0)
-				{
-					send(client_socket, file_buffer, bytes_read,0);
-				}
-			}
-			delete[] file_buffer;
-			file.close();
-			std::string end = "__EOF__";
-			usleep(100000);
-			send(client_socket, end.c_str(), end.length(), 0);
-			std::cout << "Отправлен __EOF__\n";
-			usleep(100000);
-			std::cout << "[Поток" << std::this_thread::get_id() << "] Файл " << name << " успешно отправлен\n";
-		}
-		else
+// **************************** ОТКРЫВАЕМ ФАЙЛ И ЧИТАЕМ КОЛИЧЕСТВО БАЙТ *************************
+		if(!file.is_open())
 		{
-			std::cout << "[Поток" <<std::this_thread::get_id() << "]\n";
-			std::cout << "Получено байт от клиента: " << valread << "\n";
-			std::cout << "Сообщение клиента:" << buffer << "\n";
-			send(client_socket, buffer, valread, 0);
-			std::cout << "Echo send back... \n";
+			std::string error = "ERROR: file not found";
+			std::cout << error;
+			send(client_socket, error.c_str(), error.length(), 0);
+			continue;
 		}
+		file.seekg(0, std::ios::end); //seekg - переместить курсор в файле, std::ios::end - в конец
+		long file_size = file.tellg(); //возвращает текущую позицию курсора в файле (в байтах от начала файла)
+		file.seekg(0, std::ios::beg); //возвращаем курсор в начало
+
+// ********************************** ПРОЧИТАЛИ КОЛИЧЕСТВО БАЙТ **********************************
+
+		std::string info = "INFO: START TRANSFER" + std::to_string(file_size);
+		send(client_socket, info.c_str(), info.length(),0);
+
+// *********************************** ОТПРАВИЛИ КОЛИЧЕСТВО БАЙТ **********************************
+
+		usleep(10000); //небольшой сон, чтобы сообщение и тело файла не пришли в одном сетевом пакете
+			       //и тело файла не улетело в мусор
+		char* file_buffer = new char [chunk];
+		while(!file.eof()) //пока не дошли до конца файла
+		{
+			file.read(file_buffer, chunk); //записываем в буффер [chunk] байт данных
+			int bytes_read = file.gcount(); //сколько реально записали
+			if (bytes_read > 0)
+			{
+				send(client_socket, file_buffer, bytes_read, 0); //отправляем уже данные файла
+			}
+		}
+		delete[] file_buffer;
+		file.close();
+		std::string end = "__EOF__";
+		usleep(10000);
+		send(client_socket, end.c_str(), end.length(), 0);
+		std::cout << "Отправлен __EOF__\n";
+		usleep(10000);
+		std::cout << "[Поток" << std::this_thread::get_id() << "] Файл " << filename << " успешно отправлен\n";
 		
+// ************************* ДЛЯ ЗЕРКАЛА ******************************
+		//std::cout << "[Поток" <<std::this_thread::get_id() << "]\n";
+		//std::cout << "Получено байт от клиента: " << valread << "\n";
+		//std::cout << "Сообщение клиента:" << buffer << "\n";
+		//send(client_socket, buffer, valread, 0);
+		//std::cout << "Echo send back... \n";
+		//
+// ************************* КОНЕЦ ЗЕРКАЛА ****************************
 	}
 	close(client_socket);
 }
 
 int main (int argc, char* argv[])
 {
+// *************************** ЗАДАЕМ ПОРТ ****************************
 	int port = DEFAULT_PORT;
 	for (int i = 1; i < argc; i++)
 	{
@@ -117,6 +114,11 @@ int main (int argc, char* argv[])
 			 }
 		}
 	}
+// ************************* ЗАДАЛИ ПОРТ *****************************
+
+
+// ************************* ЗАДАЕМ ПАРАМЕТРЫ И ЗАПУСКАЕМ СЕРВАК *********************
+
 	int server_descriptor = socket(AF_INET, SOCK_STREAM, 0); //создаем дескриптор сервера (дескриптор - это и есть сокет по сути) 
 	//создаем сетевой сокет на ipv4; тип сокета для последовательной двусторонней передачи, соединение ТСР; 0 - нет доп флагов
 	sockaddr_in address{}; //структура с семейством адресов, номером порта, айпи адресом
